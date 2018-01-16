@@ -4,6 +4,7 @@
   "private": true,
   "dependencies": {
     "alexa-sdk": "^1.0.10",
-    "moment-timezone": "^0.5.14"
+    "moment-timezone": "^0.5.14",
+    "node-json2html": "^1.1.1"
   }
 }

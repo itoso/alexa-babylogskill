@@ -5,13 +5,21 @@ const Alexa = require('alexa-sdk');
 
 const moment = require('moment-timezone');
 
+// DynamoDB Configuration
+const docClient = new aws.DynamoDB.DocumentClient({region: 'ap-northeast-1'});
+const tableName = 'baby-log';
+const partitionKey  = process.env.MODE;
+
 // S3 Configuration
 const s3 = new aws.S3({
     apiVersion: '2006-03-01',
     region: 'ap-northeast-1'
 });
 const bucket = process.env.BUCKET;
-const key = 'baby-log/babylog.tsv';
+const key = 'baby-log/babylog.html';
+
+const json2html = require('node-json2html');
+
 
 // 多言語対応用
 const languageStrings = {
@@ -22,10 +30,12 @@ const languageStrings = {
             LOGGED_LACTATION_POST: '分を記録しました',
             LOGGED_MILK_PRE: 'ミルク',
             LOGGED_MILK_POST: 'ミリリットルを記録しました',
-            LOGGED_POO_PEE: 'おしっこ と うんちを記録しました',
+            LOGGED_POO_PEE: 'うんちとおしっこを記録しました',
             LOGGED_PEE: 'おしっこを記録しました',
             LOGGED_POO: 'うんちを記録しました',
             LOGGED_BATH: 'お風呂を記録しました',
+            DELETED_LAST_LOG: '最後の記録を削除しました',
+            REPORT_UPDATED: 'レポートを更新しました',
             ERROR_MESSAGE: 'すみません、もう一度お願いします',
             STOP_MESSAGE: '終了します'
         }
@@ -219,6 +229,33 @@ const newSessionHandlers = {
             }
         );
     },
+
+    'DeleteLastLogIntent': function() {
+        deleteLastRecord().then(
+            () => {
+                console.log('Invoked');
+                this.emit(':tell', this.t("DELETED_LAST_LOG"));
+            },
+            () => {
+                console.log('Exception');
+                this.emit(':tell', this.t("ERROR_MESSAGE"));
+            }
+        );
+    },
+
+    'UpdateReportIntent': function() {
+        updateReport().then(
+            () => {
+                console.log('Invoked');
+                this.emit(':tell', this.t("REPORT_UPDATED"));
+            },
+            () => {
+                console.log('Exception');
+                this.emit(':tell', this.t("ERROR_MESSAGE"));
+            }
+        );
+    },
+
     'AMAZON.HelpIntent': function() {
         this.emit(':tell', this.t("STOP_MESSAGE"));
     },
@@ -242,60 +279,173 @@ exports.handler = function(event, context) {
 
 
 // 保存処理
+//function logRecord(datetime,lactationDuration=0,milkAmount=0,hasPoo=0,hasPee=0,tookBath=0){
+//    const record = datetime.format('YYYY-MM-DD') + "\t" +
+//        datetime.format('HH:mm:ss') + "\t" +
+//        lactationDuration + "\t" +
+//        milkAmount + "\t" +
+//        hasPoo + "\t" +
+//        hasPee + "\t" +
+//        tookBath + "\n";
+//
+//
+//    // params for get operation
+//    const getObjectParams = {
+//        Bucket: bucket,
+//        Key: key
+//    };
+//
+//    return new Promise((resolve, reject) => {
+//        s3.getObject(getObjectParams).promise()
+//            .then(function(data){
+//                // Build record and add to existing records
+//                const body = data.Body + record;
+//
+//                // params for put operation
+//                const putObjectParams = {
+//                    Bucket: bucket,
+//                    Key: key,
+//                    Body: body,
+//                    ContentType: 'text/tab-separated-values; charset=utf-8',
+//                    ACL: 'public-read'
+//                };
+//
+//                return s3.putObject(putObjectParams).promise();
+//
+//            })
+//            .catch(function(err){
+//                console.log(err);
+//                const message = `Error getting object ${key} from bucket ${bucket}. Make sure they exist and your bucket is in the same region as this function.`;
+//                console.log(message);
+//                reject(message);
+//            })
+//            .then(function(data) {
+//                console.log('Uploaded successfully.');
+//                console.log(data);
+//                resolve();
+//            })
+//            .catch(function(err){
+//                console.log('Error occuered when uploading to S3');
+//                console.log(err, err.stack);
+//                reject(err);
+//                context.fail(err);
+//            });
+//    });
+//};
+//
+
+// レコードを記録する
 function logRecord(datetime,lactationDuration=0,milkAmount=0,hasPoo=0,hasPee=0,tookBath=0){
-    const record = datetime.format('YYYY-MM-DD') + "\t" +
-        datetime.format('HH:mm:ss') + "\t" +
-        lactationDuration + "\t" +
-        milkAmount + "\t" +
-        hasPoo + "\t" +
-        hasPee + "\t" +
-        tookBath + "\n";
+    const record = {
+        "partitionKey" : partitionKey,
+        "createdAt" : moment().valueOf(),
+        "logDate" : datetime.format('YYYY-MM-DD'),
+        "logTime" : datetime.format('HH:mm:ss'),
+        "lactationDuration" : lactationDuration,
+        "milkAmount" : milkAmount,
+        "hasPoo" : hasPoo,
+        "hasPee" : hasPee,
+        "tookBath" : tookBath,
+    }
 
-
-    // params for get operation
-    const getObjectParams = {
-        Bucket: bucket,
-        Key: key
+    var params = {
+        TableName: tableName,
+        Item: record
     };
 
-    return new Promise((resolve, reject) => {
-        s3.getObject(getObjectParams).promise()
-            .then(function(data){
-                // Build record and add to existing records
-                const body = data.Body + record;
+    return docClient.put(params).promise()
+        .then( function(data){
+            console.log(data);
+        })
+        .catch( function(err){
+            console.log(err);
+        });
+}
 
-                // params for put operation
-                const putObjectParams = {
-                    Bucket: bucket,
-                    Key: key,
-                    Body: body,
-                    ContentType: 'text/tab-separated-values; charset=utf-8',
-                    ACL: 'public-read'
-                };
+// 最後に記録されたレコードを削除する
+function deleteLastRecord(){
 
-                return s3.putObject(putObjectParams).promise();
+    var queryParams = {
+        TableName: tableName,
+        Limit: 1,
+        KeyConditionExpression : "#k = :val",
+        ExpressionAttributeValues : {":val" : partitionKey },
+        ExpressionAttributeNames  : {"#k" : "partitionKey"},
+        ProjectionExpression : "createdAt",
+        ScanIndexForward : false
+    };
 
-            })
-            .catch(function(err){
-                console.log(err);
-                const message = `Error getting object ${key} from bucket ${bucket}. Make sure they exist and your bucket is in the same region as this function.`;
-                console.log(message);
-                reject(message);
-            })
-            .then(function(data) {
-                console.log('Uploaded successfully.');
-                console.log(data);
-                resolve();
-            })
-            .catch(function(err){
-                console.log('Error occuered when uploading to S3');
-                console.log(err, err.stack);
-                reject(err);
-                context.fail(err);
-            });
-    });
-};
+    return docClient.query(queryParams).promise()
+        .then( function(data){
+            console.log(data);
+            const createdAt = data.Items[0].createdAt;
+            const deleteParams = {
+                TableName: tableName,
+                Key : {
+                    "partitionKey" : partitionKey,
+                    "createdAt" : createdAt
+                }
+            }
+            console.log(deleteParams);
+            return docClient.delete(deleteParams).promise();
+        })
+        .then(function(data){
+            console.log("Delete result: "+ data);
+        })
+        .catch( function(err){
+            console.log(err);
+        });
 
+}
+
+// レコードを一括取得し、S3にアップロードする
+function updateReport(){
+
+    const queryParams = {
+        TableName: tableName,
+        KeyConditionExpression : "#k = :val",
+        ExpressionAttributeValues : {":val" : partitionKey },
+        ExpressionAttributeNames  : {"#k" : "partitionKey"},
+        ProjectionExpression : "createdAt,logDate,logTime,lactationDuration,milkAmount,hasPee,hasPoo,tookBath",
+        ScanIndexForward : false
+    };
+
+    return docClient.query(queryParams).promise()
+        .then(function(data){
+            // Build record and add to existing records
+            const format = {
+                '<>' : 'tr',
+                'html': '<td>${createdAt}</td><td>${logDate}</td><td>${logTime}</td><td>${lactationDuration}</td><td>${milkAmount}</td><td>${hasPee}</td><td>${hasPoo}</td><td>${tookBath}</td>'
+            };
+
+            let body = '<html><body>'
+            body += '<table border="1">';
+            body += '<thead><tr><th>createdAt</th><th>logDate</th><th>logTime</th><th>lactationDurarion</th><th>milkAmount</th><th>hasPee</th><th>hasPoo</th><th>tookBath</th></tr></thead>'
+            body += '<tbody>';
+            body += json2html.transform(data.Items,format);
+            body += '</tbody>';
+            body += '</table>';
+            body += '</body></html>';
+
+
+            // params for put operation
+            const putObjectParams = {
+                Bucket: bucket,
+                Key: key,
+                Body: body,
+                ContentType: 'text/html; charset=utf-8',
+                ACL: 'public-read'
+            };
+
+            return s3.putObject(putObjectParams).promise();
+        }).
+        catch(function(err){
+            console.log(err);
+            return Promise().reject();
+        });
+}
+
+// 指定された時刻から日時オブジェクトを作成する
 function getDatetime(timeString){
     console.log('timeString: ' + timeString);
     let datetime = moment.tz(timeString,"HH:mm","Japan");
